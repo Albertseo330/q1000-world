@@ -23,8 +23,8 @@ RUN apt-get update \
     && rm /tmp/katago.zip \
     && pip3 install --no-cache-dir runpod==1.7.13
 
-COPY analysis.cfg /opt/katago/analysis.cfg
-COPY katago-worker/rp_handler.py /opt/q1000/rp_handler.py
+COPY katago-worker/analysis.cfg /opt/katago/analysis.cfg
+COPY katago-worker/katago-worker/rp_handler.py /opt/q1000/rp_handler.py
 
 WORKDIR /opt/q1000
 CMD ["python3", "-u", "rp_handler.py"]
