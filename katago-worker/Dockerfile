@@ -7,7 +7,7 @@ ARG MODEL_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/ka
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    KATAGO_PATH=/opt/katago/katago \
+    KATAGO_PATH=/opt/katago/squashfs-root/AppRun \
     KATAGO_MODEL=/opt/katago/model.bin.gz \
     KATAGO_CONFIG=/opt/katago/analysis.cfg
 
@@ -19,6 +19,10 @@ RUN apt-get update \
     && echo "${KATAGO_SHA256}  /tmp/katago.zip" | sha256sum -c - \
     && unzip /tmp/katago.zip -d /opt/katago \
     && chmod +x /opt/katago/katago \
+    && cd /opt/katago \
+    && ./katago --appimage-extract \
+    && mv katago katago.AppImage \
+    && chmod +x /opt/katago/squashfs-root/AppRun \
     && curl -fL "${MODEL_URL}" -o /opt/katago/model.bin.gz \
     && rm /tmp/katago.zip \
     && pip3 install --no-cache-dir runpod==1.7.13
