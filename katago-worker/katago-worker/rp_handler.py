@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 
 import runpod
 
@@ -18,12 +19,14 @@ MAX_VISITS = int(os.getenv("Q1000_MAX_VISITS", "600"))
 DEFAULT_VISITS = int(os.getenv("Q1000_DEFAULT_VISITS", "120"))
 
 _engine = None
-_reader = None
+_stdout_reader = None
+_stderr_reader = None
 _results = queue.Queue()
+_stderr_tail = deque(maxlen=80)
 _lock = threading.Lock()
 
 
-def _reader_loop(process):
+def _stdout_loop(process):
     for line in process.stdout:
         line = line.strip()
         if not line:
@@ -31,13 +34,33 @@ def _reader_loop(process):
         try:
             _results.put(json.loads(line))
         except json.JSONDecodeError:
+            print(f"KataGo non-JSON stdout: {line}", flush=True)
+
+
+def _stderr_loop(process):
+    for line in process.stderr:
+        line = line.rstrip()
+        if not line:
             continue
+        _stderr_tail.append(line)
+        print(f"KataGo stderr: {line}", flush=True)
+
+
+def _engine_error(prefix):
+    details = "\n".join(_stderr_tail)
+    if details:
+        return RuntimeError(f"{prefix}\n{details}")
+    return RuntimeError(prefix)
 
 
 def _start_engine():
-    global _engine, _reader
+    global _engine, _stdout_reader, _stderr_reader
+
     if _engine and _engine.poll() is None:
         return
+
+    _stderr_tail.clear()
+
     _engine = subprocess.Popen(
         [
             KATAGO_PATH,
@@ -53,20 +76,39 @@ def _start_engine():
         text=True,
         bufsize=1,
     )
-    _reader = threading.Thread(
-        target=_reader_loop,
+
+    _stdout_reader = threading.Thread(
+        target=_stdout_loop,
         args=(_engine,),
         daemon=True,
     )
-    _reader.start()
+    _stderr_reader = threading.Thread(
+        target=_stderr_loop,
+        args=(_engine,),
+        daemon=True,
+    )
+
+    _stdout_reader.start()
+    _stderr_reader.start()
+
+    time.sleep(0.5)
+
+    return_code = _engine.poll()
+    if return_code is not None:
+        raise _engine_error(
+            f"KataGo exited during startup with code {return_code}"
+        )
 
 
 def _coordinate(value):
     value = str(value).strip().upper()
+
     if value == "PASS":
         return value
+
     if len(value) < 2 or value[0] == "I":
         raise ValueError("Invalid Go coordinate")
+
     return value
 
 
@@ -75,11 +117,13 @@ def _moves(raw_moves):
         raise ValueError("Invalid or excessive move list")
 
     cleaned = []
+
     for item in raw_moves:
         if not isinstance(item, list) or len(item) != 2:
             raise ValueError("Each move must be [color, coordinate]")
 
         color = str(item[0]).upper()
+
         if color not in ("B", "W"):
             raise ValueError("Move color must be B or W")
 
@@ -100,6 +144,7 @@ def _initial_stones(raw_stones):
 
 def _query(data):
     size = int(data.get("boardSize", 19))
+
     if size not in (9, 13, 19):
         raise ValueError("Board size must be 9, 13, or 19")
 
@@ -127,7 +172,9 @@ def _query(data):
     query = {
         "id": request_id,
         "moves": moves,
-        "initialStones": _initial_stones(data.get("initialStones")),
+        "initialStones": _initial_stones(
+            data.get("initialStones")
+        ),
         "rules": str(data.get("rules", "japanese")),
         "komi": float(data.get("komi", 6.5)),
         "boardXSize": size,
@@ -168,20 +215,35 @@ def handler(event):
     with _lock:
         _start_engine()
 
+        if _engine.stdin is None:
+            raise _engine_error("KataGo stdin is unavailable")
+
         _engine.stdin.write(
             json.dumps(query, separators=(",", ":")) + "\n"
         )
         _engine.stdin.flush()
 
         while len(outputs) < len(turns):
+            return_code = _engine.poll()
+
+            if return_code is not None:
+                raise _engine_error(
+                    f"KataGo exited during analysis with code {return_code}"
+                )
+
             remaining = deadline - time.monotonic()
 
             if remaining <= 0:
-                raise TimeoutError(
+                raise _engine_error(
                     "KataGo analysis exceeded the Q1000 time limit"
                 )
 
-            result = _results.get(timeout=remaining)
+            try:
+                result = _results.get(
+                    timeout=min(1.0, remaining)
+                )
+            except queue.Empty:
+                continue
 
             if result.get("id") == request_id:
                 outputs.append(result)
